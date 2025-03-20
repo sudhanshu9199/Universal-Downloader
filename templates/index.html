@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+    <title>Video Downloader</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='styles.css') }}"
+    />
+
+    <link
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="glass-container">
+      <div class="header">
+        <div class="logo-gradient">
+          <i class="fas fa-download"></i>
+        </div>
+        <h1 class="title-gradient">Universal Video Downloader</h1>
+        <p class="subtitle">
+          Paste any video link below to download in HD quality
+        </p>
+      </div>
+
+      <div class="content-wrapper">
+        <div class="input-card">
+          <div class="input-group">
+            <input type="text" id="videoUrl" placeholder=" " />
+            <label>Video URL Dear</label>
+            <button class="fetch-button" onclick="getFormats()">
+              <span class="button-text">Analyze Video</span>
+              <i class="fas fa-magic button-icon"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="thumbnail-wrapper">
+          <img
+            id="thumbnail"
+            src=""
+            alt="Video Thumbnail"
+            class="thumbnail-preview"
+          />
+        </div>
+
+        <div class="formats-grid" id="formats"></div>
+      </div>
+
+      <div class="loading-overlay" id="loader">
+        <div class="loading-spinner"></div>
+        <div class="progress-container">
+          <div class="progress-bar"></div>
+          <div class="progress-text">Starting download...</div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+        <div class="footer-content">
+          <p class="footer-text">&copy; 2025 Video Downloader. All rights reserved. | Developed by SUDHANSHU GHOSH💘 </p>
+          <p class="disclaimer">For Educational and personal use only. We respect copyright laws.</p>
+        </div>
+      </footer>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+  </body>
+</html>
