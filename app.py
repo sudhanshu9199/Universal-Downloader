@@ -1,8 +1,10 @@
 from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 import yt_dlp
 import os
+import shutil
 import json
 import uuid
+import time
 import threading
 from queue import Queue, Empty
 
@@ -13,31 +15,94 @@ os.makedirs(app.config['DOWNLOADS_DIR'], exist_ok=True)
 download_queues = {}
 queue_lock = threading.Lock()
 
+def get_ffmpeg_path():
+    # 1. System PATH
+    system_ffmpeg = shutil.which('ffmpeg')
+    if system_ffmpeg:
+        return system_ffmpeg
+    # 2. Bundled imageio_ffmpeg
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    return None
+
+def get_safe_filepath(filename):
+    clean_filename = os.path.basename(filename)
+    filepath = os.path.join(app.config['DOWNLOADS_DIR'], clean_filename)
+    return filepath, clean_filename
+
+def cleanup_old_downloads(max_age_seconds=3600):
+    try:
+        now = time.time()
+        for fname in os.listdir(app.config['DOWNLOADS_DIR']):
+            fpath = os.path.join(app.config['DOWNLOADS_DIR'], fname)
+            if os.path.isfile(fpath) and (now - os.path.getmtime(fpath)) > max_age_seconds:
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def get_video_formats(video_url):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True
     }
+    ffmpeg_path = get_ffmpeg_path()
+    if ffmpeg_path:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.sanitize_info(ydl.extract_info(video_url, download=False))
             formats = []
             seen = set()
             
-            for f in info['formats']:
-                if f.get('vcodec') != 'none':  # Exclude audio-only
-                    key = (f.get('height'), f.get('ext'))
-                    if key not in seen:
+            raw_formats = info.get('formats', [])
+            for f in raw_formats:
+                if f.get('vcodec') != 'none':  # Video stream
+                    height = f.get('height')
+                    ext = f.get('ext', 'mp4')
+                    filesize = f.get('filesize') or f.get('filesize_approx') or 0
+                    
+                    res_display = height if (isinstance(height, int) and height > 0) else 'Unknown'
+                    key = (res_display, ext)
+                    if key not in seen and res_display != 'Unknown':
                         seen.add(key)
                         formats.append({
-                            'format_id': f['format_id'],
-                            'resolution': f.get('height', 'Unknown'),
-                            'ext': f.get('ext', 'mp4'),
-                            'filesize': f.get('filesize', 0)
+                            'format_id': str(f.get('format_id', '')),
+                            'resolution': res_display,
+                            'ext': ext,
+                            'filesize': filesize,
+                            'is_audio': False
                         })
+
+            sorted_formats = sorted(
+                formats,
+                key=lambda x: (x['resolution'] if isinstance(x['resolution'], int) else 0),
+                reverse=True
+            )
+
+            # Audio-only download option
+            has_audio = any(f.get('acodec') != 'none' for f in raw_formats)
+            if has_audio:
+                sorted_formats.append({
+                    'format_id': 'bestaudio',
+                    'resolution': 'Audio Only',
+                    'ext': 'mp3',
+                    'filesize': 0,
+                    'is_audio': True
+                })
+
             return {
-                'formats': sorted(formats, key=lambda x: x['resolution'], reverse=True),
+                'title': info.get('title', 'Video'),
+                'formats': sorted_formats,
                 'thumbnail': info.get('thumbnail', '')
             }
     except Exception as e:
@@ -49,15 +114,19 @@ def index():
 
 @app.route('/get_formats', methods=['POST'])
 def get_formats():
-    data = request.get_json()
+    data = request.get_json() or {}
     video_url = data.get('url', '').strip()
     if not video_url:
         return jsonify({'error': 'Please enter a valid URL'}), 400
-    return jsonify(get_video_formats(video_url))
+    res = get_video_formats(video_url)
+    if 'error' in res:
+        return jsonify(res), 400
+    return jsonify(res)
 
 @app.route('/download', methods=['POST'])
 def download():
-    data = request.get_json()
+    cleanup_old_downloads()
+    data = request.get_json() or {}
     video_url = data.get('url', '').strip()
     format_id = data.get('format_id', '').strip()
     
@@ -79,9 +148,12 @@ def download():
 
     def download_task():
         try:
+            ffmpeg_path = get_ffmpeg_path()
+            outtmpl = os.path.join(app.config['DOWNLOADS_DIR'], '%(title).100s.%(ext)s')
+            
             ydl_opts = {
-                'format': f'{format_id}+bestaudio/best',
-                'outtmpl': os.path.join(app.config['DOWNLOADS_DIR'], '%(title)s.%(ext)s'),
+                'outtmpl': outtmpl,
+                'windowsfilenames': True,
                 'noprogress': False,
                 'concurrent_fragment_downloads': 5,
                 'retries': 10,
@@ -89,19 +161,52 @@ def download():
                 'socket_timeout': 30,
                 'http_chunk_size': 10485760,
                 'progress_hooks': [progress_hook],
-                'merge_output_format': 'mp4',
-                'postprocessors': [{
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4'
-                }]
             }
+
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+            if format_id == 'bestaudio':
+                ydl_opts['format'] = 'bestaudio/best'
+                if ffmpeg_path:
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+            elif ffmpeg_path:
+                # Video + Audio merged into MP4 container
+                ydl_opts['format'] = f'{format_id}+bestaudio/best'
+                ydl_opts['merge_output_format'] = 'mp4'
+            else:
+                ydl_opts['format'] = f'{format_id}/best'
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                filename = ydl.prepare_filename(info)
+                
+                final_file = None
+                if info.get('requested_downloads') and len(info['requested_downloads']) > 0:
+                    final_file = info['requested_downloads'][0].get('filepath')
+
+                if not final_file or not os.path.exists(final_file):
+                    prepared = ydl.prepare_filename(info)
+                    if os.path.exists(prepared):
+                        final_file = prepared
+                    else:
+                        base_path, _ = os.path.splitext(prepared)
+                        for cand_ext in ['.mp4', '.mp3', '.mkv', '.webm']:
+                            if os.path.exists(base_path + cand_ext):
+                                final_file = base_path + cand_ext
+                                break
+
+                if not final_file or not os.path.exists(final_file):
+                    raise FileNotFoundError("Merged download file could not be located on disk.")
+
+                basename = os.path.basename(final_file)
                 progress_queue.put({
                     'status': 'complete',
-                    'download_url': f'/downloads/{os.path.basename(filename)}'
+                    'download_url': f'/downloads/{basename}',
+                    'filename': basename
                 })
         except Exception as e:
             progress_queue.put({'error': str(e)})
@@ -134,34 +239,36 @@ def progress(download_id):
                 
     return Response(generate(), mimetype='text/event-stream')
 
-@app.route('/downloads/<filename>')
-def serve_download(filename):
-    try:
-        return send_from_directory(
-            app.config['DOWNLOADS_DIR'],
-            filename,
-            as_attachment=True,
-            conditional=True
-        )
-    except FileNotFoundError:
-        return jsonify({'error': 'File not found'}), 404
+@app.route('/downloads/<path:filename>', methods=['GET', 'DELETE'])
+@app.route('/mobile_download/<path:filename>', methods=['GET', 'DELETE'])
+def serve_or_delete_download(filename):
+    filepath, clean_name = get_safe_filepath(filename)
+    
+    if request.method == 'DELETE':
+        try:
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except PermissionError:
+                    # File handle still being streamed on Windows; will be cleaned up by background cleaner
+                    pass
+            return jsonify({'status': 'success', 'message': 'File handled'}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/mobile_download/<path:filename>')
-def mobile_download(filename):
     try:
         response = send_from_directory(
             app.config['DOWNLOADS_DIR'],
-            filename,
+            clean_name,
             as_attachment=True,
             conditional=True
         )
-        # Mobile-friendly headers to prevent caching and ensure download
         response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         response.headers['Pragma'] = 'no-cache'
-        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
     except FileNotFoundError:
         return jsonify({'error': 'File not found'}), 404
 
 if __name__ == '__main__':
+    cleanup_old_downloads()
     app.run(debug=True)

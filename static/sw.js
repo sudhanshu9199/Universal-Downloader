@@ -1,20 +1,18 @@
 self.addEventListener('install', (e) => {
-    e.waitUntil(
-        caches.open('video-dl').then(cache => {
-            return cache.addAll([
-                '/',
-                '/static/styles.css',
-                '/static/script.js',
-                'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
-            ]);
-        })
-    );
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (e) => {
+    e.waitUntil(clients.claim());
 });
 
 self.addEventListener('fetch', (e) => {
+    if (e.request.method !== 'GET') return;
+    const url = new URL(e.request.url);
+    if (url.pathname.startsWith('/progress/') || url.pathname.startsWith('/downloads/') || url.pathname.startsWith('/mobile_download/')) {
+        return;
+    }
     e.respondWith(
-        caches.match(e.request).then(response => {
-            return response || fetch(e.request);
-        })
+        fetch(e.request).catch(() => caches.match(e.request))
     );
 });

@@ -3,6 +3,10 @@ let eventSource = null;
 
 // DOM Elements
 const loader = document.getElementById("loader");
+const spinner = document.getElementById("spinner");
+const progressContainer = document.getElementById("progressContainer");
+const progressBar = document.getElementById("progressBar");
+const progressText = document.getElementById("progressText");
 const videoUrlInput = document.getElementById("videoUrl");
 const thumbnailImg = document.getElementById("thumbnail");
 const formatsDiv = document.getElementById("formats");
@@ -16,7 +20,7 @@ function getFormats() {
         return;
     }
 
-    showLoadingState();
+    showAnalyzingState();
     
     fetch("/get_formats", {
         method: "POST",
@@ -25,7 +29,7 @@ function getFormats() {
     })
     .then(handleResponse)
     .then(data => {
-        if (data.error) throw data.error;
+        if (data.error) throw new Error(data.error);
         updateFormatDisplay(data);
     })
     .catch(handleError)
@@ -33,8 +37,7 @@ function getFormats() {
 }
 
 function downloadVideo(videoUrl, formatId) {
-    showLoadingState();
-    createProgressContainer();
+    showDownloadingState();
 
     fetch("/download", {
         method: "POST",
@@ -43,7 +46,7 @@ function downloadVideo(videoUrl, formatId) {
     })
     .then(handleResponse)
     .then(data => {
-        if (data.error) throw data.error;
+        if (data.error) throw new Error(data.error);
         currentDownloadId = data.download_id;
         monitorProgress(data.download_id);
     })
@@ -57,19 +60,23 @@ function monitorProgress(downloadId) {
     eventSource = new EventSource(`/progress/${downloadId}`);
     
     eventSource.onmessage = (e) => {
-        const data = JSON.parse(e.data);
-        if (data.error) {
-            showAlert(data.error);
-            cleanup();
-        } else if (data.status === 'complete') {
-            handleDownloadCompletion(data.download_url);
-        } else {
-            updateProgressDisplay(data);
+        try {
+            const data = JSON.parse(e.data);
+            if (data.error) {
+                showAlert(data.error);
+                cleanup();
+            } else if (data.status === 'complete') {
+                handleDownloadCompletion(data.download_url, data.filename);
+            } else {
+                updateProgressDisplay(data);
+            }
+        } catch (err) {
+            console.error("Progress parse error:", err);
         }
     };
 
     eventSource.onerror = () => {
-        showAlert("Download connection interrupted");
+        showAlert("Download connection interrupted.");
         cleanup();
     };
 }
@@ -84,27 +91,35 @@ function updateFormatDisplay(data) {
         thumbnailImg.classList.add("visible");
     }
 
-    const seenFormats = new Set();
-    
+    if (!data.formats || data.formats.length === 0) {
+        formatsDiv.innerHTML = "<p style='color: white; text-align: center; grid-column: 1/-1;'>No formats found for this video.</p>";
+        return;
+    }
+
     data.formats.forEach(format => {
-        const key = `${format.resolution}p-${format.ext}`;
-        if (!seenFormats.has(key)) {
-            seenFormats.add(key);
-            formatsDiv.appendChild(createFormatOption(format));
-        }
+        formatsDiv.appendChild(createFormatOption(format));
     });
 }
 
 function createFormatOption(format) {
     const formatOption = document.createElement("div");
     formatOption.className = "format-option";
+
+    const isAudio = format.is_audio || format.resolution === 'Audio Only';
+    const resLabel = isAudio ? 'Audio Only' : `${format.resolution}p`;
+    const iconClass = isAudio ? 'fa-music' : 'fa-video';
+    const extLabel = (format.ext || (isAudio ? 'MP3' : 'MP4')).toUpperCase();
+    const sizeLabel = format.filesize > 0 
+        ? (format.filesize / (1024 * 1024)).toFixed(1) + " MB" 
+        : (isAudio ? "High Quality Audio" : "Merged HD Video + Audio");
+
     formatOption.innerHTML = `
         <div class="format-info">
-            <span class="format-resolution">${format.resolution}p</span>
+            <span class="format-resolution">
+                <i class="fas ${iconClass}" style="margin-right: 6px;"></i>${resLabel}
+            </span>
             <span class="format-details">
-                ${format.ext.toUpperCase()} • ${format.filesize > 0 
-                    ? (format.filesize / (1024 * 1024)).toFixed(2) + " MB" 
-                    : "N/A"}
+                ${extLabel} • ${sizeLabel}
             </span>
         </div>
         <i class="fas fa-download format-download-icon"></i>
@@ -118,59 +133,60 @@ function createFormatOption(format) {
 }
 
 // Progress UI functions
-function createProgressContainer() {
-    const progressContainer = document.createElement("div");
-    progressContainer.className = "progress-container";
-    progressContainer.innerHTML = `
-        <div class="progress-bar"></div>
-        <div class="progress-text">Starting download...</div>
-    `;
-    loader.appendChild(progressContainer);
+function showAnalyzingState() {
+    loader.style.display = "flex";
+    if (spinner) spinner.style.display = "block";
+    if (progressContainer) progressContainer.style.display = "none";
+    formatsDiv.innerHTML = "";
+}
+
+function showDownloadingState() {
+    loader.style.display = "flex";
+    if (spinner) spinner.style.display = "none";
+    if (progressContainer) {
+        progressContainer.style.display = "block";
+        if (progressBar) progressBar.style.width = "0%";
+        if (progressText) progressText.textContent = "Starting download...";
+    }
 }
 
 function updateProgressDisplay(data) {
-    const progressBar = document.querySelector(".progress-bar");
-    const progressText = document.querySelector(".progress-text");
-    
-    progressBar.style.width = data.percent;
-    progressText.textContent = `${data.percent} • ${data.speed} • ETA: ${data.eta}`;
+    if (progressBar && data.percent) {
+        progressBar.style.width = data.percent;
+    }
+    if (progressText) {
+        const percent = data.percent || '0%';
+        const speed = data.speed || 'N/A';
+        const eta = data.eta || 'N/A';
+        progressText.textContent = `${percent} • ${speed} • ETA: ${eta}`;
+    }
 }
 
 // Helper functions
-function handleDownloadCompletion(downloadUrl) {
+function handleDownloadCompletion(downloadUrl, filename) {
     cleanup();
-    // window.location.href = downloadUrl;
-    // showAlert("Download completed!", 3000);
+    const cleanName = filename || downloadUrl.split('/').pop();
 
-    // Mobile-friendly download handling
-    fetch(downloadUrl)
-        .then(response => response.blob())
-        .then(blob => {
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = downloadUrl.split('/').pop();
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-            showAlert("Download completed! Check your device's Downloads folder", 5000);
-        })
-        .catch(error => {
-            showAlert("Download failed: " + error.message);
-        });
-    
-    // Clean up server-side file
-    fetch(`/mobile_download/${downloadUrl.split('/').pop()}`, { method: 'DELETE' });
-}
+    // Trigger browser file download directly
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.setAttribute('download', cleanName);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 
-function showLoadingState() {
-    loader.style.display = "flex";
-    formatsDiv.innerHTML = "";
+    showAlert("Download completed! Your file is downloading.", 5000);
+
+    // Clean up server-side file after delay to allow download to complete safely
+    setTimeout(() => {
+        fetch(downloadUrl, { method: 'DELETE' }).catch(() => {});
+    }, 45000);
 }
 
 function resetLoadingState() {
     loader.style.display = "none";
+    if (spinner) spinner.style.display = "none";
+    if (progressContainer) progressContainer.style.display = "none";
 }
 
 function cleanup() {
@@ -183,15 +199,18 @@ function cleanup() {
 }
 
 function handleResponse(response) {
-    if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return response.json();
+    return response.json().then(data => {
+        if (!response.ok) {
+            const errorMsg = data.error || `HTTP error! status: ${response.status}`;
+            throw new Error(errorMsg);
+        }
+        return data;
+    });
 }
 
 function handleError(error) {
     console.error("Error:", error);
-    showAlert(typeof error === 'string' ? error : error.message);
+    showAlert(typeof error === 'string' ? error : (error.message || 'An error occurred'));
     cleanup();
 }
 
@@ -208,8 +227,7 @@ function showAlert(message, duration=3000) {
     const alertBox = document.createElement("div");
     alertBox.className = "alert-box";
     
-    // Add success class if message contains "Download completed!"
-    if (message.includes("Download completed!")) {
+    if (message.includes("completed") || message.includes("success")) {
         alertBox.classList.add("success");
     }
     
@@ -218,8 +236,7 @@ function showAlert(message, duration=3000) {
     setTimeout(() => alertBox.remove(), duration);
 }
 
-
-// Register Service Worker at the bottom of the file
+// Service worker registration
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('/static/sw.js')
