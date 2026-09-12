@@ -2,73 +2,270 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
-    <title>Video Downloader</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#07070f" />
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}" />
+    <title>OmniDownloader • Next-Gen Universal Media Downloader</title>
+
+    <!-- Google Fonts: Outfit (Display) & Plus Jakarta Sans (Body) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
       rel="stylesheet"
-      href="{{ url_for('static', filename='styles.css') }}"
     />
 
+    <!-- FontAwesome 6 -->
     <link
-      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
       rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
     />
+
+    <!-- Modern Stylesheet -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
   </head>
   <body>
-    <div class="glass-container">
-      <div class="header">
-        <div class="logo-gradient">
-          <i class="fas fa-download"></i>
-        </div>
-        <h1 class="title-gradient">Universal Video Downloader</h1>
-        <p class="subtitle">
-          Paste any video link below to download in HD quality
-        </p>
-      </div>
+    <!-- Ambient Aurora Mesh Background -->
+    <div class="aurora-bg">
+      <div class="aurora-sphere sphere-1"></div>
+      <div class="aurora-sphere sphere-2"></div>
+      <div class="aurora-sphere sphere-3"></div>
+      <div class="aurora-grid"></div>
+    </div>
 
-      <div class="content-wrapper">
-        <div class="input-card">
-          <div class="input-group">
-            <input type="text" id="videoUrl" placeholder=" " />
-            <label>Video URL Dear</label>
-            <button class="fetch-button" onclick="getFormats()">
-              <span class="button-text">Analyze Video</span>
-              <i class="fas fa-magic button-icon"></i>
-            </button>
+    <!-- Main App Shell -->
+    <div class="app-shell">
+      <!-- Top Navigation Bar -->
+      <nav class="nav-bar">
+        <div class="nav-brand">
+          <div class="brand-badge">
+            <i class="fa-solid fa-bolt"></i>
+          </div>
+          <div class="brand-text">
+            <span class="brand-title">OMNI<span class="brand-accent">DL</span></span>
+            <span class="brand-version">v2.6</span>
           </div>
         </div>
 
-        <div class="thumbnail-wrapper">
-          <img
-            id="thumbnail"
-            src=""
-            alt="Video Thumbnail"
-            class="thumbnail-preview"
+        <div class="nav-status">
+          <span class="status-indicator online"></span>
+          <span class="status-label">Ultra Engine Active</span>
+        </div>
+      </nav>
+
+      <!-- Hero Header -->
+      <header class="hero-section">
+        <div class="hero-pill">
+          <i class="fa-solid fa-sparkles"></i>
+          <span>Multi-Platform Media Pipeline</span>
+        </div>
+        <h1 class="hero-headline">
+          Universal <span class="gradient-text">Media Downloader</span>
+        </h1>
+        <p class="hero-subtext">
+          Extract pristine 4K video, 1080p Full HD, and 320kbps studio audio in seconds.
+        </p>
+      </header>
+
+      <!-- Central Downloader Console -->
+      <main class="console-card" id="consoleCard">
+        <!-- Search & URL Input Bar -->
+        <div class="search-wrapper">
+          <div class="search-icon-box" id="platformIconBox">
+            <i class="fa-solid fa-link" id="platformIcon"></i>
+          </div>
+
+          <input
+            type="text"
+            id="videoUrl"
+            class="search-input"
+            placeholder="Paste YouTube, Instagram, TikTok, or Twitter link..."
+            autocomplete="off"
+            spellcheck="false"
           />
+
+          <div class="input-actions">
+            <button
+              type="button"
+              class="icon-action-btn"
+              id="clearBtn"
+              title="Clear input"
+              style="display: none;"
+            >
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+            <button
+              type="button"
+              class="pill-action-btn"
+              id="pasteBtn"
+              title="Paste from clipboard"
+            >
+              <i class="fa-regular fa-clipboard"></i>
+              <span>Paste</span>
+            </button>
+          </div>
+
+          <button class="analyze-btn" id="analyzeBtn" onclick="getFormats()">
+            <span class="btn-text">Analyze</span>
+            <i class="fa-solid fa-arrow-right btn-icon"></i>
+            <div class="btn-spinner" id="analyzeSpinner" style="display: none;"></div>
+          </button>
         </div>
 
-        <div class="formats-grid" id="formats"></div>
-      </div>
-
-      <div class="loading-overlay" id="loader">
-        <div class="loading-spinner" id="spinner"></div>
-        <div class="progress-container" id="progressContainer" style="display: none;">
-          <div class="progress-bar" id="progressBar"></div>
-          <div class="progress-text" id="progressText">Starting download...</div>
+        <!-- Supported Platform Chips -->
+        <div class="platforms-row">
+          <span class="platforms-label">Supported Sources:</span>
+          <div class="platform-chips" id="platformChips">
+            <span class="p-chip" data-platform="youtube"><i class="fa-brands fa-youtube"></i> YouTube</span>
+            <span class="p-chip" data-platform="instagram"><i class="fa-brands fa-instagram"></i> Instagram</span>
+            <span class="p-chip" data-platform="tiktok"><i class="fa-brands fa-tiktok"></i> TikTok</span>
+            <span class="p-chip" data-platform="twitter"><i class="fa-brands fa-x-twitter"></i> X / Twitter</span>
+            <span class="p-chip" data-platform="facebook"><i class="fa-brands fa-facebook-f"></i> Facebook</span>
+            <span class="p-chip" data-platform="reddit"><i class="fa-brands fa-reddit-alien"></i> Reddit</span>
+            <span class="p-chip" data-platform="soundcloud"><i class="fa-brands fa-soundcloud"></i> SoundCloud</span>
+          </div>
         </div>
-      </div>
-    </div>
 
-    <footer class="app-footer">
-        <div class="footer-content">
-          <p class="footer-text">&copy; 2025 Video Downloader. All rights reserved. | Developed by SUDHANSHU GHOSH💘 </p>
-          <p class="disclaimer">For Educational and personal use only. We respect copyright laws.</p>
+        <!-- Skeleton Loading State -->
+        <div class="skeleton-loader" id="skeletonLoader" style="display: none;">
+          <div class="skeleton-thumb"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton-line line-title"></div>
+            <div class="skeleton-line line-meta"></div>
+            <div class="skeleton-chips">
+              <div class="skeleton-chip"></div>
+              <div class="skeleton-chip"></div>
+              <div class="skeleton-chip"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Media Preview Section -->
+        <section class="media-preview-section" id="mediaPreview" style="display: none;">
+          <div class="preview-card">
+            <div class="preview-thumbnail-container">
+              <img id="thumbnail" class="preview-thumbnail" src="" alt="Video thumbnail" />
+              <div class="duration-badge" id="durationBadge">00:00</div>
+              <div class="platform-badge" id="platformBadge">YouTube</div>
+            </div>
+
+            <div class="preview-meta">
+              <h2 class="preview-title" id="videoTitle">Video Title</h2>
+              <div class="preview-channel-row">
+                <span class="channel-name" id="channelName"><i class="fa-regular fa-user"></i> Creator</span>
+                <span class="view-count" id="viewCount" style="display: none;"><i class="fa-regular fa-eye"></i> 0 views</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Format Selector Tabs -->
+          <div class="format-tabs">
+            <button
+              class="tab-btn active"
+              id="tabVideo"
+              onclick="switchFormatTab('video')"
+            >
+              <i class="fa-solid fa-video"></i>
+              <span>Video (MP4 + Audio)</span>
+            </button>
+            <button
+              class="tab-btn"
+              id="tabAudio"
+              onclick="switchFormatTab('audio')"
+            >
+              <i class="fa-solid fa-music"></i>
+              <span>Audio Only (MP3)</span>
+            </button>
+          </div>
+
+          <!-- Formats Grid -->
+          <div class="formats-grid" id="formatsGrid"></div>
+        </section>
+
+        <!-- Active Download HUD -->
+        <div class="download-hud" id="downloadHud" style="display: none;">
+          <div class="hud-header">
+            <div class="hud-status">
+              <div class="pulse-dot"></div>
+              <span id="hudStatusText">Downloading & Merging Streams...</span>
+            </div>
+            <span class="hud-percent" id="hudPercent">0%</span>
+          </div>
+
+          <div class="hud-progress-track">
+            <div class="hud-progress-fill" id="hudProgressFill"></div>
+          </div>
+
+          <div class="hud-telemetry">
+            <div class="telemetry-item">
+              <span class="tel-label">Transfer Speed</span>
+              <span class="tel-val" id="hudSpeed">0.0 MB/s</span>
+            </div>
+            <div class="telemetry-item">
+              <span class="tel-label">Estimated Time</span>
+              <span class="tel-val" id="hudEta">Calculating...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Completion Celebration Card -->
+        <div class="success-card" id="successCard" style="display: none;">
+          <div class="success-icon-wrap">
+            <i class="fa-solid fa-check"></i>
+          </div>
+          <div class="success-info">
+            <h3 class="success-title">Ready for playback!</h3>
+            <p class="success-sub" id="successFilename">Your download is ready.</p>
+          </div>
+          <div class="success-actions">
+            <button class="btn-primary" id="saveAgainBtn">
+              <i class="fa-solid fa-download"></i> Save File
+            </button>
+            <button class="btn-ghost" onclick="resetDownloadConsole()">
+              <i class="fa-solid fa-rotate-left"></i> Convert Another
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <!-- Recent Downloads Section -->
+      <section class="recent-section" id="recentSection" style="display: none;">
+        <div class="section-head">
+          <div class="head-title">
+            <i class="fa-solid fa-clock-rotate-left"></i>
+            <span>Recent Conversions</span>
+          </div>
+          <button class="clear-history-btn" onclick="clearRecentHistory()">Clear History</button>
+        </div>
+        <div class="recent-list" id="recentList"></div>
+      </section>
+
+      <!-- App Footer -->
+      <footer class="app-footer">
+        <div class="footer-inner">
+          <div class="footer-brand">
+            <i class="fa-solid fa-circle-nodes"></i>
+            <span>OMNIDOWNLOADER CORE 2026</span>
+          </div>
+          <p class="disclaimer">
+            Engineered for high-speed multimedia processing. Exclusively for personal and educational use.
+          </p>
+          <p class="credits">
+            Crafted with passion by <span class="author-name">SUDHANSHU GHOSH</span>
+          </p>
         </div>
       </footer>
+    </div>
 
+    <!-- Toast Notification Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- JavaScript Application Logic -->
     <script src="{{ url_for('static', filename='script.js') }}"></script>
   </body>
 </html>

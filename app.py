@@ -48,6 +48,49 @@ def cleanup_old_downloads(max_age_seconds=3600):
     except Exception:
         pass
 
+def format_duration(seconds):
+    if not seconds:
+        return ""
+    try:
+        s = int(seconds)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+    except Exception:
+        return ""
+
+def format_number(num):
+    if not num:
+        return ""
+    try:
+        n = int(num)
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.1f}K"
+        return str(n)
+    except Exception:
+        return ""
+
+def get_quality_badge(height):
+    try:
+        h = int(height)
+        if h >= 2160:
+            return "4K Ultra HD"
+        if h >= 1440:
+            return "2K QHD"
+        if h >= 1080:
+            return "Full HD"
+        if h >= 720:
+            return "HD"
+        if h >= 480:
+            return "Standard"
+        return "Fast"
+    except Exception:
+        return "Standard"
+
 def get_video_formats(video_url):
     ydl_opts = {
         'quiet': True,
@@ -61,52 +104,75 @@ def get_video_formats(video_url):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.sanitize_info(ydl.extract_info(video_url, download=False))
-            formats = []
-            seen = set()
+            video_formats = []
+            audio_formats = []
+            seen_res = set()
             
-            raw_formats = info.get('formats', [])
+            raw_formats = info.get('formats', []) or []
             for f in raw_formats:
                 if f.get('vcodec') != 'none':  # Video stream
                     height = f.get('height')
                     ext = f.get('ext', 'mp4')
                     filesize = f.get('filesize') or f.get('filesize_approx') or 0
                     
-                    res_display = height if (isinstance(height, int) and height > 0) else 'Unknown'
-                    key = (res_display, ext)
-                    if key not in seen and res_display != 'Unknown':
-                        seen.add(key)
-                        formats.append({
-                            'format_id': str(f.get('format_id', '')),
-                            'resolution': res_display,
-                            'ext': ext,
-                            'filesize': filesize,
-                            'is_audio': False
-                        })
+                    if isinstance(height, int) and height > 0:
+                        if height not in seen_res:
+                            seen_res.add(height)
+                            video_formats.append({
+                                'format_id': str(f.get('format_id', '')),
+                                'resolution': height,
+                                'badge': get_quality_badge(height),
+                                'ext': 'MP4',
+                                'fps': f.get('fps'),
+                                'filesize': filesize,
+                                'is_audio': False
+                            })
 
-            sorted_formats = sorted(
-                formats,
-                key=lambda x: (x['resolution'] if isinstance(x['resolution'], int) else 0),
-                reverse=True
-            )
+            # Sort video formats descending by resolution
+            sorted_video = sorted(video_formats, key=lambda x: x['resolution'], reverse=True)
 
-            # Audio-only download option
+            # Build audio options
             has_audio = any(f.get('acodec') != 'none' for f in raw_formats)
-            if has_audio:
-                sorted_formats.append({
-                    'format_id': 'bestaudio',
-                    'resolution': 'Audio Only',
-                    'ext': 'mp3',
-                    'filesize': 0,
-                    'is_audio': True
-                })
+            if has_audio or len(sorted_video) > 0:
+                audio_formats = [
+                    {
+                        'format_id': 'audio_mp3_320',
+                        'resolution': '320 kbps',
+                        'badge': 'Studio HQ',
+                        'ext': 'MP3',
+                        'filesize': 0,
+                        'is_audio': True
+                    },
+                    {
+                        'format_id': 'audio_mp3_192',
+                        'resolution': '192 kbps',
+                        'badge': 'High Quality',
+                        'ext': 'MP3',
+                        'filesize': 0,
+                        'is_audio': True
+                    },
+                    {
+                        'format_id': 'audio_m4a',
+                        'resolution': 'AAC Lossless',
+                        'badge': 'Original',
+                        'ext': 'M4A',
+                        'filesize': 0,
+                        'is_audio': True
+                    }
+                ]
 
             return {
-                'title': info.get('title', 'Video'),
-                'formats': sorted_formats,
-                'thumbnail': info.get('thumbnail', '')
+                'title': info.get('title', 'Video Media'),
+                'thumbnail': info.get('thumbnail', ''),
+                'duration': format_duration(info.get('duration')),
+                'uploader': info.get('uploader') or info.get('channel') or '',
+                'views': format_number(info.get('view_count')),
+                'platform': info.get('extractor_key', 'Media'),
+                'video_formats': sorted_video,
+                'audio_formats': audio_formats
             }
     except Exception as e:
-        return {'error': f'Failed to process video: {str(e)}'}
+        return {'error': f'Failed to analyze media: {str(e)}'}
 
 @app.route('/')
 def index():
@@ -117,7 +183,7 @@ def get_formats():
     data = request.get_json() or {}
     video_url = data.get('url', '').strip()
     if not video_url:
-        return jsonify({'error': 'Please enter a valid URL'}), 400
+        return jsonify({'error': 'Please enter a valid media URL'}), 400
     res = get_video_formats(video_url)
     if 'error' in res:
         return jsonify(res), 400
@@ -131,7 +197,7 @@ def download():
     format_id = data.get('format_id', '').strip()
     
     if not video_url or not format_id:
-        return jsonify({'error': 'Invalid request'}), 400
+        return jsonify({'error': 'Invalid request parameters'}), 400
 
     download_id = str(uuid.uuid4())
     progress_queue = Queue()
@@ -166,16 +232,24 @@ def download():
             if ffmpeg_path:
                 ydl_opts['ffmpeg_location'] = ffmpeg_path
 
-            if format_id == 'bestaudio':
+            # Audio-only extraction handling
+            if format_id.startswith('audio_') or format_id == 'bestaudio':
                 ydl_opts['format'] = 'bestaudio/best'
                 if ffmpeg_path:
-                    ydl_opts['postprocessors'] = [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }]
+                    if format_id == 'audio_m4a':
+                        ydl_opts['postprocessors'] = [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'm4a',
+                        }]
+                    else:
+                        bitrate = '320' if '320' in format_id else '192'
+                        ydl_opts['postprocessors'] = [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': bitrate,
+                        }]
             elif ffmpeg_path:
-                # Video + Audio merged into MP4 container
+                # Video + Best Audio merged into universal MP4
                 ydl_opts['format'] = f'{format_id}+bestaudio/best'
                 ydl_opts['merge_output_format'] = 'mp4'
             else:
@@ -194,13 +268,13 @@ def download():
                         final_file = prepared
                     else:
                         base_path, _ = os.path.splitext(prepared)
-                        for cand_ext in ['.mp4', '.mp3', '.mkv', '.webm']:
+                        for cand_ext in ['.mp4', '.mp3', '.m4a', '.mkv', '.webm']:
                             if os.path.exists(base_path + cand_ext):
                                 final_file = base_path + cand_ext
                                 break
 
                 if not final_file or not os.path.exists(final_file):
-                    raise FileNotFoundError("Merged download file could not be located on disk.")
+                    raise FileNotFoundError("Merged download file could not be found.")
 
                 basename = os.path.basename(final_file)
                 progress_queue.put({
@@ -250,7 +324,6 @@ def serve_or_delete_download(filename):
                 try:
                     os.remove(filepath)
                 except PermissionError:
-                    # File handle still being streamed on Windows; will be cleaned up by background cleaner
                     pass
             return jsonify({'status': 'success', 'message': 'File handled'}), 200
         except Exception as e:
