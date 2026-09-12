@@ -304,41 +304,106 @@ function startDownload(formatId, ext) {
     });
 }
 
+let pollInterval = null;
+
 function listenToProgress(downloadId) {
-  if (eventSource) eventSource.close();
-  eventSource = new EventSource(`/progress/${downloadId}`);
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
 
-  eventSource.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      if (data.error) {
-        showToast(data.error, "error");
-        cleanupDownloadState();
-        downloadHud.style.display = "none";
-        mediaPreview.style.display = "flex";
-      } else if (data.status === 'complete') {
-        onDownloadCompleted(data.download_url, data.filename);
-      } else {
-        updateHud(data);
-      }
-    } catch (err) {
-      console.error("Progress parsing error:", err);
+  let completed = false;
+
+  const handleStateUpdate = (data) => {
+    if (completed) return;
+
+    if (data.error) {
+      completed = true;
+      showToast(data.error, "error");
+      cleanupDownloadState();
+      downloadHud.style.display = "none";
+      mediaPreview.style.display = "flex";
+      return;
     }
+
+    if (data.status === 'complete') {
+      completed = true;
+      cleanupDownloadState();
+      onDownloadCompleted(data.download_url, data.filename);
+      return;
+    }
+
+    updateHud(data);
   };
 
-  eventSource.onerror = () => {
-    // Graceful check if connection ended
-    cleanupDownloadState();
-  };
+  // 1. Primary: Real-time EventSource Stream
+  try {
+    eventSource = new EventSource(`/progress/${downloadId}`);
+
+    eventSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        handleStateUpdate(data);
+      } catch (err) {
+        console.error("Progress parse error:", err);
+      }
+    };
+
+    eventSource.onerror = () => {
+      // Keep going, polling fallback ensures no stuck states
+    };
+  } catch (err) {
+    console.warn("EventSource unavailable, fallback active.", err);
+  }
+
+  // 2. Secondary: Active JSON Polling Fallback every 1 second
+  pollInterval = setInterval(() => {
+    if (completed) {
+      clearInterval(pollInterval);
+      return;
+    }
+    fetch(`/status/${downloadId}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data) {
+          handleStateUpdate(data);
+        }
+      })
+      .catch(() => {});
+  }, 1000);
+}
+
+function stripAnsi(str) {
+  if (!str) return '';
+  return String(str).replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '').trim();
 }
 
 function updateHud(data) {
-  const pct = data.percent || '0%';
-  hudPercent.textContent = pct;
-  hudProgressFill.style.width = pct;
-  hudSpeed.textContent = data.speed || 'Downloading...';
-  hudEta.textContent = data.eta ? `ETA ${data.eta}` : 'Optimizing...';
-  hudStatusText.textContent = "Merging high-fidelity audio & video...";
+  const cleanPct = stripAnsi(data.percent) || '0%';
+  let pctNum = typeof data.percent_num === 'number' ? data.percent_num : parseFloat(cleanPct);
+  if (isNaN(pctNum)) pctNum = 0;
+  pctNum = Math.min(100, Math.max(0, pctNum));
+
+  hudPercent.textContent = `${pctNum.toFixed(1)}%`;
+  hudProgressFill.style.width = `${pctNum}%`;
+
+  const cleanSpeed = stripAnsi(data.speed);
+  hudSpeed.textContent = cleanSpeed || 'Downloading...';
+
+  const cleanEta = stripAnsi(data.eta);
+  hudEta.textContent = cleanEta ? (cleanEta.startsWith('ETA') ? cleanEta : `ETA: ${cleanEta}`) : 'Optimizing...';
+
+  if (data.status_text) {
+    hudStatusText.textContent = stripAnsi(data.status_text);
+  } else if (pctNum < 98) {
+    hudStatusText.textContent = "Transferring media stream...";
+  } else {
+    hudStatusText.textContent = "Merging audio and video into MP4...";
+  }
 }
 
 function onDownloadCompleted(downloadUrl, filename) {
@@ -388,6 +453,10 @@ function cleanupDownloadState() {
   if (eventSource) {
     eventSource.close();
     eventSource = null;
+  }
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
   }
   currentDownloadId = null;
 }

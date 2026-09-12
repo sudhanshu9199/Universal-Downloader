@@ -1,19 +1,55 @@
 from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 import yt_dlp
 import os
+import re
 import shutil
 import json
 import uuid
 import time
 import threading
-from queue import Queue, Empty
+import urllib.parse
+
+ANSI_REGEX = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+def clean_ansi(text):
+    if not text:
+        return ""
+    return ANSI_REGEX.sub('', str(text)).strip()
 
 app = Flask(__name__)
 app.config['DOWNLOADS_DIR'] = os.path.join(app.root_path, 'downloads')
 os.makedirs(app.config['DOWNLOADS_DIR'], exist_ok=True)
 
-download_queues = {}
-queue_lock = threading.Lock()
+# State Store: Persistent job states for dual SSE + Polling synchronization
+download_jobs = {}
+job_lock = threading.Lock()
+
+def update_job(job_id, **kwargs):
+    with job_lock:
+        if job_id not in download_jobs:
+            download_jobs[job_id] = {
+                'id': job_id,
+                'status': 'starting',
+                'percent': '0.0%',
+                'percent_num': 0.0,
+                'speed': 'Connecting...',
+                'eta': 'Starting...',
+                'status_text': 'Initializing stream...',
+                'download_url': None,
+                'filename': None,
+                'error': None,
+                'created_at': time.time(),
+                'updated_at': time.time()
+            }
+        download_jobs[job_id].update(kwargs)
+        download_jobs[job_id]['updated_at'] = time.time()
+
+def cleanup_stale_jobs():
+    with job_lock:
+        now = time.time()
+        to_del = [jid for jid, j in download_jobs.items() if now - j.get('updated_at', 0) > 1800]
+        for jid in to_del:
+            del download_jobs[jid]
 
 def get_ffmpeg_path():
     # 1. System PATH
@@ -31,7 +67,7 @@ def get_ffmpeg_path():
     return None
 
 def get_safe_filepath(filename):
-    clean_filename = os.path.basename(filename)
+    clean_filename = os.path.basename(urllib.parse.unquote(filename))
     filepath = os.path.join(app.config['DOWNLOADS_DIR'], clean_filename)
     return filepath, clean_filename
 
@@ -95,7 +131,9 @@ def get_video_formats(video_url):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': True
+        'extract_flat': True,
+        'nocolor': True,
+        'no_color': True,
     }
     ffmpeg_path = get_ffmpeg_path()
     if ffmpeg_path:
@@ -110,7 +148,7 @@ def get_video_formats(video_url):
             
             raw_formats = info.get('formats', []) or []
             for f in raw_formats:
-                if f.get('vcodec') != 'none':  # Video stream
+                if f.get('vcodec') != 'none':
                     height = f.get('height')
                     ext = f.get('ext', 'mp4')
                     filesize = f.get('filesize') or f.get('filesize_approx') or 0
@@ -128,10 +166,8 @@ def get_video_formats(video_url):
                                 'is_audio': False
                             })
 
-            # Sort video formats descending by resolution
             sorted_video = sorted(video_formats, key=lambda x: x['resolution'], reverse=True)
 
-            # Build audio options
             has_audio = any(f.get('acodec') != 'none' for f in raw_formats)
             if has_audio or len(sorted_video) > 0:
                 audio_formats = [
@@ -192,6 +228,7 @@ def get_formats():
 @app.route('/download', methods=['POST'])
 def download():
     cleanup_old_downloads()
+    cleanup_stale_jobs()
     data = request.get_json() or {}
     video_url = data.get('url', '').strip()
     format_id = data.get('format_id', '').strip()
@@ -200,39 +237,123 @@ def download():
         return jsonify({'error': 'Invalid request parameters'}), 400
 
     download_id = str(uuid.uuid4())
-    progress_queue = Queue()
-    with queue_lock:
-        download_queues[download_id] = progress_queue
+    update_job(
+        download_id,
+        status='starting',
+        status_text='Connecting to media stream...',
+        percent='0.0%',
+        percent_num=0.0
+    )
 
     def progress_hook(d):
-        if d['status'] == 'downloading':
-            progress_queue.put({
-                'percent': d.get('_percent_str', '0.0%'),
-                'speed': d.get('_speed_str', 'N/A'),
-                'eta': d.get('_eta_str', 'N/A')
-            })
+        status = d.get('status')
+        if status == 'downloading':
+            downloaded = d.get('downloaded_bytes') or 0
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+
+            if total > 0:
+                pct_num = min(99.0, max(0.1, (downloaded / total) * 100))
+                pct_str = f"{pct_num:.1f}%"
+            else:
+                raw_pct = clean_ansi(d.get('_percent_str', ''))
+                m = re.search(r'(\d+(?:\.\d+)?)', raw_pct)
+                if m:
+                    pct_num = min(99.0, max(0.1, float(m.group(1))))
+                    pct_str = f"{pct_num:.1f}%"
+                else:
+                    pct_num = 1.0
+                    pct_str = "1.0%"
+
+            speed_val = d.get('speed')
+            if speed_val and speed_val > 0:
+                if speed_val >= 1024 * 1024:
+                    speed_str = f"{speed_val / (1024 * 1024):.2f} MB/s"
+                elif speed_val >= 1024:
+                    speed_str = f"{speed_val / 1024:.1f} KB/s"
+                else:
+                    speed_str = f"{speed_val:.0f} B/s"
+            else:
+                raw_speed = clean_ansi(d.get('_speed_str', ''))
+                speed_str = raw_speed if raw_speed else "Downloading..."
+
+            eta_val = d.get('eta')
+            if eta_val is not None:
+                try:
+                    eta_sec = int(eta_val)
+                    m, s = divmod(eta_sec, 60)
+                    h, m = divmod(m, 60)
+                    if h > 0:
+                        eta_str = f"{h}h {m:02d}m {s:02d}s"
+                    elif m > 0:
+                        eta_str = f"{m}m {s:02d}s"
+                    else:
+                        eta_str = f"{s}s"
+                except Exception:
+                    eta_str = clean_ansi(d.get('_eta_str', ''))
+            else:
+                eta_str = clean_ansi(d.get('_eta_str', ''))
+
+            fname = d.get('filename') or ''
+            if any(k in fname for k in ['.f251', '.f140', '.m4a', 'audio']):
+                stage_text = "Downloading audio stream..."
+            else:
+                stage_text = "Downloading video stream..."
+
+            update_job(
+                download_id,
+                status='downloading',
+                percent=pct_str,
+                percent_num=round(pct_num, 1),
+                speed=speed_str,
+                eta=eta_str or "Optimizing...",
+                status_text=stage_text
+            )
+        elif status == 'finished':
+            update_job(
+                download_id,
+                status='processing',
+                percent='99.0%',
+                percent_num=99.0,
+                speed='Merging',
+                eta='Almost done...',
+                status_text='Merging audio and video tracks into MP4...'
+            )
+
+    def postprocessor_hook(d):
+        if d.get('status') == 'started':
+            update_job(
+                download_id,
+                status='processing',
+                percent='99.0%',
+                percent_num=99.0,
+                speed='Remuxing',
+                eta='Finishing up...',
+                status_text='Encoding and finalizing container format...'
+            )
 
     def download_task():
         try:
             ffmpeg_path = get_ffmpeg_path()
-            outtmpl = os.path.join(app.config['DOWNLOADS_DIR'], '%(title).100s.%(ext)s')
+            outtmpl = os.path.join(app.config['DOWNLOADS_DIR'], '%(title).80s.%(ext)s')
             
+            # High-performance, throttled-free yt-dlp configuration
             ydl_opts = {
                 'outtmpl': outtmpl,
                 'windowsfilenames': True,
+                'restrictfilenames': True,  # Ensures safe ASCII filenames across OS and HTTP URLs
                 'noprogress': False,
-                'concurrent_fragment_downloads': 5,
+                'nocolor': True,
+                'no_color': True,
                 'retries': 10,
                 'fragment_retries': 10,
                 'socket_timeout': 30,
-                'http_chunk_size': 10485760,
                 'progress_hooks': [progress_hook],
+                'postprocessor_hooks': [postprocessor_hook],
             }
 
             if ffmpeg_path:
                 ydl_opts['ffmpeg_location'] = ffmpeg_path
 
-            # Audio-only extraction handling
             if format_id.startswith('audio_') or format_id == 'bestaudio':
                 ydl_opts['format'] = 'bestaudio/best'
                 if ffmpeg_path:
@@ -249,7 +370,6 @@ def download():
                             'preferredquality': bitrate,
                         }]
             elif ffmpeg_path:
-                # Video + Best Audio merged into universal MP4
                 ydl_opts['format'] = f'{format_id}+bestaudio/best'
                 ydl_opts['merge_output_format'] = 'mp4'
             else:
@@ -274,20 +394,27 @@ def download():
                                 break
 
                 if not final_file or not os.path.exists(final_file):
-                    raise FileNotFoundError("Merged download file could not be found.")
+                    raise FileNotFoundError("Merged download file could not be located on disk.")
 
                 basename = os.path.basename(final_file)
-                progress_queue.put({
-                    'status': 'complete',
-                    'download_url': f'/downloads/{basename}',
-                    'filename': basename
-                })
+                safe_download_url = f'/downloads/{urllib.parse.quote(basename)}'
+                
+                update_job(
+                    download_id,
+                    status='complete',
+                    percent='100.0%',
+                    percent_num=100.0,
+                    status_text='Ready for playback!',
+                    download_url=safe_download_url,
+                    filename=basename
+                )
         except Exception as e:
-            progress_queue.put({'error': str(e)})
-        finally:
-            with queue_lock:
-                if download_id in download_queues:
-                    del download_queues[download_id]
+            update_job(
+                download_id,
+                status='error',
+                error=str(e),
+                status_text=f"Error: {str(e)}"
+            )
 
     threading.Thread(target=download_task, daemon=True).start()
     return jsonify({'download_id': download_id})
@@ -295,23 +422,40 @@ def download():
 @app.route('/progress/<download_id>')
 def progress(download_id):
     def generate():
-        with queue_lock:
-            queue = download_queues.get(download_id)
-        
-        if not queue:
-            yield 'data: {"error": "Invalid download ID"}\n\n'
-            return
+        last_percent = None
+        last_status = None
+        start = time.time()
+        while time.time() - start < 600:
+            with job_lock:
+                job = download_jobs.get(download_id)
             
-        while True:
-            try:
-                progress = queue.get(timeout=60)
-                yield f"data: {json.dumps(progress)}\n\n"
-                if 'error' in progress or 'status' in progress:
-                    break
-            except Empty:
-                break
-                
-    return Response(generate(), mimetype='text/event-stream')
+            if job:
+                if job['percent_num'] != last_percent or job['status'] != last_status or job['status'] in ('complete', 'error'):
+                    last_percent = job['percent_num']
+                    last_status = job['status']
+                    yield f"data: {json.dumps(job)}\n\n"
+                    
+                    if job['status'] in ('complete', 'error'):
+                        break
+            time.sleep(0.3)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
+
+@app.route('/status/<download_id>')
+def job_status(download_id):
+    with job_lock:
+        job = download_jobs.get(download_id)
+    if not job:
+        return jsonify({'status': 'not_found', 'error': 'Download session expired'}), 404
+    return jsonify(job)
 
 @app.route('/downloads/<path:filename>', methods=['GET', 'DELETE'])
 @app.route('/mobile_download/<path:filename>', methods=['GET', 'DELETE'])
