@@ -127,6 +127,27 @@ def get_quality_badge(height):
     except Exception:
         return "Standard"
 
+COOKIE_FILE = os.path.join(app.root_path, 'cookies.txt')
+SECRET_COOKIE_FILE = '/etc/secrets/cookies.txt'
+
+def get_cookie_file():
+    # 1. Render Secret File path (/etc/secrets/cookies.txt)
+    if os.path.exists(SECRET_COOKIE_FILE) and os.path.getsize(SECRET_COOKIE_FILE) > 0:
+        return SECRET_COOKIE_FILE
+    # 2. Local cookies.txt in project root
+    if os.path.exists(COOKIE_FILE) and os.path.getsize(COOKIE_FILE) > 0:
+        return COOKIE_FILE
+    # 3. From Render Environment Variable YOUTUBE_COOKIES
+    env_cookies = os.environ.get('YOUTUBE_COOKIES')
+    if env_cookies and len(env_cookies.strip()) > 0:
+        try:
+            with open(COOKIE_FILE, 'w', encoding='utf-8') as f:
+                f.write(env_cookies.strip())
+            return COOKIE_FILE
+        except Exception:
+            pass
+    return None
+
 def get_video_formats(video_url):
     ydl_opts = {
         'quiet': True,
@@ -134,10 +155,24 @@ def get_video_formats(video_url):
         'extract_flat': True,
         'nocolor': True,
         'no_color': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web'],
+                'player_skip': ['configs', 'webpage']
+            }
+        }
     }
     ffmpeg_path = get_ffmpeg_path()
     if ffmpeg_path:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+    cookie_path = get_cookie_file()
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
+
+    proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
+    if proxy:
+        ydl_opts['proxy'] = proxy
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -349,10 +384,24 @@ def download():
                 'socket_timeout': 30,
                 'progress_hooks': [progress_hook],
                 'postprocessor_hooks': [postprocessor_hook],
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'ios', 'web'],
+                        'player_skip': ['configs', 'webpage']
+                    }
+                }
             }
 
             if ffmpeg_path:
                 ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+            cookie_path = get_cookie_file()
+            if cookie_path:
+                ydl_opts['cookiefile'] = cookie_path
+
+            proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
+            if proxy:
+                ydl_opts['proxy'] = proxy
 
             if format_id.startswith('audio_') or format_id == 'bestaudio':
                 ydl_opts['format'] = 'bestaudio/best'
