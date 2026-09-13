@@ -152,16 +152,18 @@ def get_video_formats(video_url):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': True,
         'nocolor': True,
         'no_color': True,
-        'extractor_args': {
+    }
+    cookie_path = get_cookie_file()
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
+    else:
+        ydl_opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['android', 'ios', 'web'],
-                'player_skip': ['configs', 'webpage']
+                'player_client': ['android', 'ios', 'web']
             }
         }
-    }
     ffmpeg_path = get_ffmpeg_path()
     if ffmpeg_path:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
@@ -384,12 +386,6 @@ def download():
                 'socket_timeout': 30,
                 'progress_hooks': [progress_hook],
                 'postprocessor_hooks': [postprocessor_hook],
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android', 'ios', 'web'],
-                        'player_skip': ['configs', 'webpage']
-                    }
-                }
             }
 
             if ffmpeg_path:
@@ -398,6 +394,12 @@ def download():
             cookie_path = get_cookie_file()
             if cookie_path:
                 ydl_opts['cookiefile'] = cookie_path
+            else:
+                ydl_opts['extractor_args'] = {
+                    'youtube': {
+                        'player_client': ['android', 'ios', 'web']
+                    }
+                }
 
             proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
             if proxy:
