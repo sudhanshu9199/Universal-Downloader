@@ -127,125 +127,158 @@ def get_quality_badge(height):
     except Exception:
         return "Standard"
 
-COOKIE_FILE = os.path.join(app.root_path, 'cookies.txt')
-SECRET_COOKIE_FILE = '/etc/secrets/cookies.txt'
+COOKIE_CANDIDATES = [
+    '/etc/secrets/cookies.txt',
+    os.path.join(app.root_path, 'cookies.txt'),
+    os.path.join(app.root_path, 'www.youtube.com_cookies.txt'),
+    os.path.join(app.root_path, 'youtube_cookies.txt'),
+]
 
 def get_cookie_file():
-    # 1. Render Secret File path (/etc/secrets/cookies.txt)
-    if os.path.exists(SECRET_COOKIE_FILE) and os.path.getsize(SECRET_COOKIE_FILE) > 0:
-        return SECRET_COOKIE_FILE
-    # 2. Local cookies.txt in project root
-    if os.path.exists(COOKIE_FILE) and os.path.getsize(COOKIE_FILE) > 0:
-        return COOKIE_FILE
-    # 3. From Render Environment Variable YOUTUBE_COOKIES
+    # 1. Check file candidates
+    for p in COOKIE_CANDIDATES:
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    # 2. From Render Environment Variable YOUTUBE_COOKIES
     env_cookies = os.environ.get('YOUTUBE_COOKIES')
     if env_cookies and len(env_cookies.strip()) > 0:
         try:
-            with open(COOKIE_FILE, 'w', encoding='utf-8') as f:
-                f.write(env_cookies.strip())
-            return COOKIE_FILE
+            target = os.path.join(app.root_path, 'cookies.txt')
+            # Normalize escaped newlines if passed in Render dashboard
+            content = env_cookies.strip().replace('\\n', '\n')
+            with open(target, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return target
         except Exception:
             pass
     return None
 
-def get_video_formats(video_url):
-    ydl_opts = {
+def get_base_ydl_opts(cookie_path=None, client_list=None):
+    if client_list is None:
+        client_list = ['ios', 'android', 'web']
+    opts = {
         'quiet': True,
         'no_warnings': True,
         'nocolor': True,
         'no_color': True,
-    }
-    cookie_path = get_cookie_file()
-    if cookie_path:
-        ydl_opts['cookiefile'] = cookie_path
-    else:
-        ydl_opts['extractor_args'] = {
+        'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web']
+                'player_client': client_list
             }
         }
+    }
+    if cookie_path and os.path.exists(cookie_path) and os.path.getsize(cookie_path) > 0:
+        opts['cookiefile'] = cookie_path
+
     ffmpeg_path = get_ffmpeg_path()
     if ffmpeg_path:
-        ydl_opts['ffmpeg_location'] = ffmpeg_path
-
-    cookie_path = get_cookie_file()
-    if cookie_path:
-        ydl_opts['cookiefile'] = cookie_path
+        opts['ffmpeg_location'] = ffmpeg_path
 
     proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
     if proxy:
-        ydl_opts['proxy'] = proxy
+        opts['proxy'] = proxy
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(video_url, download=False))
-            video_formats = []
-            audio_formats = []
-            seen_res = set()
+    return opts
+
+def get_video_formats(video_url):
+    cookie_path = get_cookie_file()
+    
+    # Multi-tier extraction strategy:
+    # 1. With cookies + mobile clients (if cookies present)
+    # 2. Without cookies + mobile clients (if cookies expired/rotated or blocked)
+    # 3. Android fallback
+    attempts = []
+    if cookie_path:
+        attempts.append((cookie_path, ['ios', 'android', 'web']))
+        attempts.append((None, ['ios', 'android', 'web']))
+        attempts.append((None, ['android', 'ios']))
+    else:
+        attempts.append((None, ['ios', 'android', 'web']))
+        attempts.append((None, ['android', 'ios']))
+
+    info = None
+    last_error = None
+
+    for c_path, clients in attempts:
+        try:
+            ydl_opts = get_base_ydl_opts(cookie_path=c_path, client_list=clients)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                raw_info = ydl.extract_info(video_url, download=False)
+                if raw_info:
+                    info = ydl.sanitize_info(raw_info)
+                    break
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if not info:
+        return {'error': f'Failed to analyze media: {last_error or "Unknown extraction error"}'}
+
+    video_formats = []
+    audio_formats = []
+    seen_res = set()
+    
+    raw_formats = info.get('formats', []) or []
+    for f in raw_formats:
+        if f.get('vcodec') != 'none':
+            height = f.get('height')
+            ext = f.get('ext', 'mp4')
+            filesize = f.get('filesize') or f.get('filesize_approx') or 0
             
-            raw_formats = info.get('formats', []) or []
-            for f in raw_formats:
-                if f.get('vcodec') != 'none':
-                    height = f.get('height')
-                    ext = f.get('ext', 'mp4')
-                    filesize = f.get('filesize') or f.get('filesize_approx') or 0
-                    
-                    if isinstance(height, int) and height > 0:
-                        if height not in seen_res:
-                            seen_res.add(height)
-                            video_formats.append({
-                                'format_id': str(f.get('format_id', '')),
-                                'resolution': height,
-                                'badge': get_quality_badge(height),
-                                'ext': 'MP4',
-                                'fps': f.get('fps'),
-                                'filesize': filesize,
-                                'is_audio': False
-                            })
+            if isinstance(height, int) and height > 0:
+                if height not in seen_res:
+                    seen_res.add(height)
+                    video_formats.append({
+                        'format_id': str(f.get('format_id', '')),
+                        'resolution': height,
+                        'badge': get_quality_badge(height),
+                        'ext': 'MP4',
+                        'fps': f.get('fps'),
+                        'filesize': filesize,
+                        'is_audio': False
+                    })
 
-            sorted_video = sorted(video_formats, key=lambda x: x['resolution'], reverse=True)
+    sorted_video = sorted(video_formats, key=lambda x: x['resolution'], reverse=True)
 
-            has_audio = any(f.get('acodec') != 'none' for f in raw_formats)
-            if has_audio or len(sorted_video) > 0:
-                audio_formats = [
-                    {
-                        'format_id': 'audio_mp3_320',
-                        'resolution': '320 kbps',
-                        'badge': 'Studio HQ',
-                        'ext': 'MP3',
-                        'filesize': 0,
-                        'is_audio': True
-                    },
-                    {
-                        'format_id': 'audio_mp3_192',
-                        'resolution': '192 kbps',
-                        'badge': 'High Quality',
-                        'ext': 'MP3',
-                        'filesize': 0,
-                        'is_audio': True
-                    },
-                    {
-                        'format_id': 'audio_m4a',
-                        'resolution': 'AAC Lossless',
-                        'badge': 'Original',
-                        'ext': 'M4A',
-                        'filesize': 0,
-                        'is_audio': True
-                    }
-                ]
-
-            return {
-                'title': info.get('title', 'Video Media'),
-                'thumbnail': info.get('thumbnail', ''),
-                'duration': format_duration(info.get('duration')),
-                'uploader': info.get('uploader') or info.get('channel') or '',
-                'views': format_number(info.get('view_count')),
-                'platform': info.get('extractor_key', 'Media'),
-                'video_formats': sorted_video,
-                'audio_formats': audio_formats
+    has_audio = any(f.get('acodec') != 'none' for f in raw_formats)
+    if has_audio or len(sorted_video) > 0:
+        audio_formats = [
+            {
+                'format_id': 'audio_mp3_320',
+                'resolution': '320 kbps',
+                'badge': 'Studio HQ',
+                'ext': 'MP3',
+                'filesize': 0,
+                'is_audio': True
+            },
+            {
+                'format_id': 'audio_mp3_192',
+                'resolution': '192 kbps',
+                'badge': 'High Quality',
+                'ext': 'MP3',
+                'filesize': 0,
+                'is_audio': True
+            },
+            {
+                'format_id': 'audio_m4a',
+                'resolution': 'AAC Lossless',
+                'badge': 'Original',
+                'ext': 'M4A',
+                'filesize': 0,
+                'is_audio': True
             }
-    except Exception as e:
-        return {'error': f'Failed to analyze media: {str(e)}'}
+        ]
+
+    return {
+        'title': info.get('title', 'Video Media'),
+        'thumbnail': info.get('thumbnail', ''),
+        'duration': format_duration(info.get('duration')),
+        'uploader': info.get('uploader') or info.get('channel') or '',
+        'views': format_number(info.get('view_count')),
+        'platform': info.get('extractor_key', 'Media'),
+        'video_formats': sorted_video,
+        'audio_formats': audio_formats
+    }
 
 @app.route('/')
 def index():
@@ -373,61 +406,80 @@ def download():
             ffmpeg_path = get_ffmpeg_path()
             outtmpl = os.path.join(app.config['DOWNLOADS_DIR'], '%(title).80s.%(ext)s')
             
-            # High-performance, throttled-free yt-dlp configuration
-            ydl_opts = {
-                'outtmpl': outtmpl,
-                'windowsfilenames': True,
-                'restrictfilenames': True,  # Ensures safe ASCII filenames across OS and HTTP URLs
-                'noprogress': False,
-                'nocolor': True,
-                'no_color': True,
-                'retries': 10,
-                'fragment_retries': 10,
-                'socket_timeout': 30,
-                'progress_hooks': [progress_hook],
-                'postprocessor_hooks': [postprocessor_hook],
-            }
-
-            if ffmpeg_path:
-                ydl_opts['ffmpeg_location'] = ffmpeg_path
-
             cookie_path = get_cookie_file()
+            dl_attempts = []
             if cookie_path:
-                ydl_opts['cookiefile'] = cookie_path
+                dl_attempts.append((cookie_path, ['ios', 'android', 'web']))
+                dl_attempts.append((None, ['ios', 'android', 'web']))
+                dl_attempts.append((None, ['android', 'ios']))
             else:
-                ydl_opts['extractor_args'] = {
-                    'youtube': {
-                        'player_client': ['android', 'ios', 'web']
+                dl_attempts.append((None, ['ios', 'android', 'web']))
+                dl_attempts.append((None, ['android', 'ios']))
+
+            info = None
+            dl_err = None
+
+            for c_path, clients in dl_attempts:
+                ydl_opts = {
+                    'outtmpl': outtmpl,
+                    'windowsfilenames': True,
+                    'restrictfilenames': True,  # Ensures safe ASCII filenames across OS and HTTP URLs
+                    'noprogress': False,
+                    'nocolor': True,
+                    'no_color': True,
+                    'retries': 10,
+                    'fragment_retries': 10,
+                    'socket_timeout': 30,
+                    'progress_hooks': [progress_hook],
+                    'postprocessor_hooks': [postprocessor_hook],
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': clients
+                        }
                     }
                 }
+                if c_path and os.path.exists(c_path):
+                    ydl_opts['cookiefile'] = c_path
 
-            proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
-            if proxy:
-                ydl_opts['proxy'] = proxy
-
-            if format_id.startswith('audio_') or format_id == 'bestaudio':
-                ydl_opts['format'] = 'bestaudio/best'
                 if ffmpeg_path:
-                    if format_id == 'audio_m4a':
-                        ydl_opts['postprocessors'] = [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'm4a',
-                        }]
-                    else:
-                        bitrate = '320' if '320' in format_id else '192'
-                        ydl_opts['postprocessors'] = [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': bitrate,
-                        }]
-            elif ffmpeg_path:
-                ydl_opts['format'] = f'{format_id}+bestaudio/best'
-                ydl_opts['merge_output_format'] = 'mp4'
-            else:
-                ydl_opts['format'] = f'{format_id}/best'
+                    ydl_opts['ffmpeg_location'] = ffmpeg_path
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=True)
+                proxy = os.environ.get('YOUTUBE_PROXY') or os.environ.get('HTTP_PROXY')
+                if proxy:
+                    ydl_opts['proxy'] = proxy
+
+                if format_id.startswith('audio_') or format_id == 'bestaudio':
+                    ydl_opts['format'] = 'bestaudio/best'
+                    if ffmpeg_path:
+                        if format_id == 'audio_m4a':
+                            ydl_opts['postprocessors'] = [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'm4a',
+                            }]
+                        else:
+                            bitrate = '320' if '320' in format_id else '192'
+                            ydl_opts['postprocessors'] = [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'mp3',
+                                'preferredquality': bitrate,
+                            }]
+                elif ffmpeg_path:
+                    ydl_opts['format'] = f'{format_id}+bestaudio/best'
+                    ydl_opts['merge_output_format'] = 'mp4'
+                else:
+                    ydl_opts['format'] = f'{format_id}/best'
+
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(video_url, download=True)
+                        if info:
+                            break
+                except Exception as e:
+                    dl_err = e
+                    continue
+
+            if not info:
+                raise dl_err or RuntimeError("Download failed across all extraction tiers.")
                 
                 final_file = None
                 if info.get('requested_downloads') and len(info['requested_downloads']) > 0:
